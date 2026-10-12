@@ -29,8 +29,16 @@ Các tên file trong thư mục đã được cấp sẵn:
 | run_sweep.py | A | Tự động hóa thí nghiệm quét tải (Load Sweep) đa mức |
 | summarize_sweep.py | A | Gom nhiều run, tìm knee point bão hòa, xuất bảng sweep |
 | plot_sweep.py | A | Vẽ đường cong tải (Throughput, Hockey-stick, Little's Law) |
-| mark_fault.py | A | Ghi đáp án sự cố (Delay, Loss, Rate, Consumer Slow/Down) |
-| evaluate.py | A | Đối chiếu nhãn dự đoán với sự cố thật |
+| run_iperf_baseline.py | A | Đo năng lực thật của liên kết khi chưa bóp (iperf3 TCP/UDP, ping baseline) |
+| run_link_sweep.py | A | Bộ thí nghiệm đặc tả liên kết hạ tầng (Độ hữu dụng M/M/1, Mất gói Mathis, Trần TBF) |
+| plot_link_sweep.py | A | Vẽ 3 đường cong đặc tả hạ tầng đối chiếu mô hình giải tích lý thuyết |
+| cross_layer_join.py | A | Khớp số liệu hai tầng theo timestamp thành bảng nhân quả L3/L4 -> L7 |
+| plot_cross_layer.py | A | Vẽ đồ thị ánh xạ xuyên tầng (Throughput collapse, Bufferbloat, Service Drop) |
+| zabbix_fidelity.py | A | Đánh giá độ trung thực của Zabbix (chu kỳ 30s/60s vs ground truth 1s, Nyquist limit) |
+| plot_fidelity.py | A | Vẽ đồ thị đánh giá độ trễ và hiện tượng bỏ sót micro-burst của Zabbix |
+| zabbix/nt531_agent_infra.conf | A/B | Cấu hình Zabbix Agent (UserParameter ping qua liên kết bóp, qdisc backlog, macro {$LINK.CAP}) |
+| mark_fault.py | A | Ghi đáp án sự cố (Delay, Loss, Rate, Consumer Slow/Down - Phụ lục) |
+| evaluate.py | A | Đối chiếu nhãn dự đoán với sự cố thật (Phụ lục) |
 | plot_results.py | A | Vẽ timeline PNG một run (throughput, latency, backlog, RTT) |
 | scripts/network_delay.sh | C | Gây trễ AMQP và ICMP tới B (netem delay) |
 | scripts/network_loss.sh | C | Gây mất gói AMQP và ICMP tới B (netem loss) |
@@ -502,22 +510,109 @@ Kiểm tra:
 - Kiểm chứng định luật Little $L = \lambda W$.
 - Bộ luật chẩn đoán và cơ chế làm mượt nhãn (StableLabel).
 
-## 16. Khung viết báo cáo chuẩn cho môn NT531
+## 16. Khung Đo đạc Hạ tầng Mạng & Khảo sát Ánh xạ Xuyên tầng (Cross-Layer Evaluation)
 
-Khi viết báo cáo nộp thầy, nhóm nên trình bày theo cấu trúc sau:
-1. **Đặt vấn đề:** Giám sát hiệu năng và chẩn đoán nghẽn cổ chai trong hệ thống truyền tin phân tán (RabbitMQ over TCP).
-2. **Cơ sở lý thuyết:**
-   - Mô hình hàng đợi $M/M/c$ và điều kiện ổn định $\rho < 1$.
-   - Định luật Little $L = \lambda W$.
-   - Tác động của suy giảm mạng (Delay, Loss theo công thức Mathis, Rate Limit theo Token Bucket Filter) lên tầng ứng dụng.
-3. **Thiết kế đo đạc & Observability với Zabbix:**
-   - Mô hình 3 nút vật lý A - B - C trong LAN.
-   - Vai trò của Zabbix là nền tảng Full-Stack Observability đa tầng.
-   - Khắc phục thiên lệch sống sót (Survivorship Bias) trong đo độ trễ p95.
-   - Hiệu chỉnh ngưỡng khoa học dựa trên phân phối thực nghiệm ($\mu + 3\sigma$).
-4. **Kết quả thực nghiệm:**
-   - **Thí nghiệm 1 - Đường cong tải (Load Curve):** Xác định Saturation Knee Point và đồ thị Hockey-stick.
-   - **Thí nghiệm 2 - Kiểm chứng Định luật Little:** Phân tích độ khớp của $L = \lambda W$ ở các mức tải.
-   - **Thí nghiệm 3 - Suy giảm mạng vs Xử lý chậm:** So sánh tác động của Delay, Packet Loss (Mathis) và Consumer Slow lên throughput và hàng đợi.
-   - **Thí nghiệm 4 - Đánh giá giải thuật chẩn đoán:** Ma trận nhầm lẫn (Confusion Matrix) giữa Queue-only baseline và Combined Classifier.
-5. **Kết luận & Đóng góp:** Bộ công cụ có thể tái lập, đo đạc trung thực, và tự động hóa toàn diện từ thu thập, chẩn đoán đến hiển thị trên Zabbix.
+> [!IMPORTANT]
+> **Điều kiện tiên quyết bắt buộc:** Đồng bộ đồng hồ ba máy A, B, C bằng `chrony` hoặc NTP.
+> Toàn bộ giá trị nghiên cứu của đồ án nằm ở việc **ghép nối số liệu hai tầng theo mốc thời gian (timestamp)**. Nếu lệch đồng hồ, bảng ánh xạ quan hệ nhân quả giữa L3/L4 và L7 sẽ bị sai lệch hoàn toàn.
+
+Xem hướng dẫn chi tiết dành riêng cho báo cáo đồ án tại: [REPORT_GUIDE.md](file:///c:/Users/Duc%20Thinh/Documents/Học%20tập/NT531-Đánh%20giá%20hiệu%20năng/Đồ%20Án/nt531-zabbix/REPORT_GUIDE.md)
+
+---
+
+### Nhóm 1: Biến Zabbix thành Máy đo Hạ tầng Mạng
+
+1. **Cài đặt Zabbix Agent trên các nút**:
+   - Sử dụng file cấu hình [zabbix/nt531_agent_infra.conf](file:///c:/Users/Duc%20Thinh/Documents/Học%20tập/NT531-Đánh%20giá%20hiệu%20năng/Đồ%20Án/nt531-zabbix/zabbix/nt531_agent_infra.conf).
+   - Thu thập thông lượng cổng: `net.if.in[eth1]` / `net.if.out[eth1]` (tự động nhận diện qua `net.if.discovery`).
+2. **Item Độ hữu dụng Kênh truyền $\rho$**:
+   - Công thức: `last(//net.if.out[eth1]) * 8 / {$LINK.CAP}`
+   - **Bắt buộc dùng Macro `{$LINK.CAP}`**: Cấu hình macro trên host (ví dụ `10M` hoặc `50M` theo trần tbf). Tuyệt đối **không** lấy tốc độ NIC vật lý 1 Gbps làm mẫu số, nếu không $\rho$ luôn tiệm cận 0 và đường cong mất hoàn toàn ý nghĩa.
+3. **UserParameter Ping đi xuyên qua liên kết bị bóp**:
+   - Chạy lệnh ping A→B hoặc A→C ngay trên máy phát (Node A) bằng UserParameter (`nt531.ping.rtt[*]`, `nt531.ping.loss[*]`) rồi đẩy số về Zabbix. Tuyệt đối không để Zabbix Server ping thẳng bypass qua liên kết bị bóp.
+4. **Đo Baseline iperf3 khi chưa bóp liên kết**:
+   ```bash
+   python run_iperf_baseline.py --server-ip 192.168.10.30
+   ```
+
+---
+
+### Nhóm 2: Bộ Thí nghiệm Đặc tả Liên kết Hạ tầng (Link Characterization Harness)
+
+Chạy song song với sweep tải dịch vụ, đối chiếu trực tiếp với các mô hình giải tích lý thuyết:
+
+```bash
+# 1. Quét Độ hữu dụng - Độ trễ (chỉ tbf, iperf3 UDP tăng dần rho=0.1..0.95, đối chiếu M/M/1)
+python run_link_sweep.py --scenario utilization_delay --server-ip 192.168.10.30 --link-cap 10 --execute
+
+# 2. Quét Mất gói - Throughput TCP (netem loss 0%..10%, đối chiếu Công thức Mathis)
+python run_link_sweep.py --scenario loss_tcp --server-ip 192.168.10.30 --execute
+
+# 3. Quét Trần Băng thông (tbf rate 1..50 Mbps)
+python run_link_sweep.py --scenario bandwidth_cap --server-ip 192.168.10.30 --execute
+
+# Vẽ 3 đồ thị đặc tả liên kết hạ tầng:
+python plot_link_sweep.py
+```
+
+---
+
+### Nhóm 3: Ánh xạ Nhân quả Xuyên Tầng (L3/L4 Hạ tầng $\to$ L7 Dịch vụ)
+
+Đây là **đóng góp nghiên cứu trọng tâm** của đồ án: Chạy cả tầng hạ tầng và tầng dịch vụ dưới cùng kịch bản netem, đồng bộ mốc thời gian, rồi gộp lại thành bảng nhân quả:
+
+```bash
+# Ghép metric hai tầng thành bảng nhân quả và lưu JSON/CSV
+python cross_layer_join.py
+
+# Vẽ đồ thị ánh xạ xuyên tầng 3 bảng (Throughput collapse, Bufferbloat, Service drop)
+python plot_cross_layer.py
+```
+
+- **Cơ chế khuếch đại tổn thất**: Mất gói tin L4 kích hoạt TCP retransmission và làm stall 2 vòng xác nhận AMQP (confirm/ack), làm throughput dịch vụ sụt giảm dốc hơn nhiều so với tốc độ mạng thô.
+- **Dây chuyền tắc nghẽn**: Khi $\rho \to 1.0$, hàng đợi qdisc Linux phồng lên (Bufferbloat) kéo theo bùng nổ hàng đợi RabbitMQ tại tầng 7.
+
+---
+
+### Nhóm 4: Đánh giá Độ Trung thực của Giám sát Zabbix (Observability Fidelity)
+
+Khảo sát sai số và hiện tượng bỏ sót biến động ngắn do chu kỳ lấy mẫu (Polling Interval):
+
+```bash
+# Đánh giá sai số đỉnh, độ trễ phát hiện cảnh báo và hiện tượng mù micro-burst
+python zabbix_fidelity.py
+
+# Xuất đồ thị đối chiếu chu kỳ 30s/60s với Ground Truth 1s
+python plot_fidelity.py
+```
+
+- **Định lý Shannon-Nyquist**: Chu kỳ lấy mẫu $T_{\text{poll}} = 60\text{s}$ hoàn toàn mù trước các micro-burst ngắn hơn $120\text{s}$.
+- **Sai số đánh giá đỉnh**: Bỏ lỡ đỉnh RTT thực tế lên tới trên 70-90%.
+- **Độ trễ cảnh báo**: Tắc nghẽn kéo dài bị trễ trung bình $\approx 30\text{s}$ trước khi trigger Zabbix chuyển màu đỏ.
+
+---
+
+## 17. Khung Viết Báo cáo Chuẩn cho Môn NT531
+
+1. **Chương 1: Đặt Vấn đề & Mô hình Hàng đợi Mạng**
+   - Sự cần thiết của quan sát phân tầng và quan hệ nhân quả L3/L4 $\leftrightarrow$ L7.
+   - Lý thuyết hàng đợi $M/M/1$, Định luật Little $L = \lambda W$, Công thức Mathis cho TCP.
+2. **Chương 2: Thiết kế Hệ thống Thực nghiệm & Giám sát Zabbix**
+   - Sơ đồ Topology 3 máy (Node A Client, Node B Wan Emulator, Node C Target & Server).
+   - Bắt buộc đồng bộ thời gian Chrony/NTP ($\Delta t < 1\text{ms}$).
+   - Bảng phân tầng Item Zabbix (Macro `{$LINK.CAP}`, UserParameter Ping A→C, qdisc backlog).
+3. **Chương 3: Đặc tả Năng lực Liên kết Hạ tầng (L3/L4 Characterization)**
+   - Đường cong Độ hữu dụng $\rho$ vs Độ trễ (Đối chiếu mô hình $M/M/1$).
+   - Đường cong Suy giảm Throughput TCP vs Mất gói (Đối chiếu công thức Mathis).
+   - Quét trần băng thông TBF và hiệu suất liên kết.
+4. **Chương 4: Đóng góp Trọng tâm - Ánh xạ Nhân quả Xuyên Tầng (Cross-Layer Mapping)**
+   - Ma trận ánh xạ: Mức suy hao mạng $\to$ Biến động RTT $\to$ Sụt giảm Msg/s $\to$ Bùng nổ p95 dịch vụ.
+   - Cơ chế khuếch đại tổn thất (Loss Amplification Factor) trong mô hình Publish-Confirm.
+   - Hiện tượng Bufferbloat dây chuyền từ qdisc Linux sang hàng đợi ứng dụng.
+5. **Chương 5: Nghiên cứu Độ Trung thực của Hệ thống Giám sát Zabbix**
+   - Đánh giá đánh đổi giữa chu kỳ polling (30s, 60s) và chi phí mạng/CPU.
+   - Hiện tượng mù Micro-burst và sai số đánh giá đỉnh (Peak Underestimation).
+   - Giới hạn Nyquist và giải pháp kiến trúc (Push telemetry / High-freq probe).
+6. **Phụ lục: Hệ thống Chẩn đoán Sự cố Cũ (Rule-based Diagnostic Suite)**
+   - Thuật toán phân loại ma trận nhầm lẫn (`diagnose.py`, `evaluate.py`, `mark_fault.py`).
+
