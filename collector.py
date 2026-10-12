@@ -81,9 +81,9 @@ def main():
                     events = read_events(folder/'events.jsonl')
                     recent = [e for e in events if e['event']=='completed' and previous < e['ts'] <= now]
                     recent_attempted = [e for e in events if e['event']=='attempted' and previous < e['ts'] <= now]
-                    all_attempted = sum(1 for e in events if e['event']=='attempted')
+                    all_confirmed = sum(1 for e in events if e['event']=='confirmed')
                     all_completed = sum(1 for e in events if e['event']=='completed')
-                    unfinished_count = max(0, all_attempted - all_completed)
+                    unfinished_count = max(0, all_confirmed - all_completed)
                     heartbeat = json.loads((folder/'heartbeat.json').read_text())
                     app_valid = manifest.get('status') != 'running' or -2 <= time.time()-heartbeat['ts'] <= 30
                 except (OSError, ValueError, KeyError):
@@ -108,7 +108,10 @@ def main():
                     r.raise_for_status()
                     v = r.json()
                     observed_at = time.time()
-                    fresh = -2 <= observed_at-v['ts'] <= 15
+                    skew = observed_at - v['ts']
+                    if skew < -2 or skew > 15:
+                        print(f"WARNING: Telemetry probe clock skew/delay ({skew:.1f}s) exceeded tolerance [-2s..15s]. Run chrony/ntp.", flush=True)
+                    fresh = -2 <= skew <= 15
                     services = [w['processing_ms'] for w in v.get('workers', []) if w['run_id']==a.run_id
                                 and -2 <= observed_at-w['ts'] <= 30]
                     s.update(probe_valid=fresh and v.get('rtt_ms') is not None,

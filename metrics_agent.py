@@ -20,11 +20,11 @@ def main():
         while True:
             rtt = None
             try:
-                proc = subprocess.run(['ping', '-n', '-c', '1', '-W', '2', a.broker_ip],
-                                      capture_output=True, text=True, timeout=4, env={'LC_ALL': 'C', 'PATH': '/usr/bin:/bin'})
-                match = re.search(r'time[=<]([\d.]+)', proc.stdout)
-                if match:
-                    rtt = float(match[1])
+                proc = subprocess.run(['ping', '-n', '-c', '3', '-W', '2', a.broker_ip],
+                                      capture_output=True, text=True, timeout=5, env={'LC_ALL': 'C', 'PATH': '/usr/bin:/bin'})
+                times = [float(m) for m in re.findall(r'time[=<]([\d.]+)', proc.stdout)]
+                if times:
+                    rtt = round(sum(times) / len(times), 2)
             except (OSError, subprocess.TimeoutExpired):
                 pass
             workers = []

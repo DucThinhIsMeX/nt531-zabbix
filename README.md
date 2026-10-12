@@ -57,12 +57,16 @@ Ví dụ A=192.168.1.101, B=.102, C=.103. Đây là ví dụ, thay bằng IP LAN
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv python3-pip curl iproute2 iputils-ping
+sudo apt install -y python3 python3-venv python3-pip curl iproute2 iputils-ping chrony
+sudo systemctl enable --now chrony
+chronyc tracking
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 cp .env.example .env
 ```
+
+> **Bắt buộc đồng bộ thời gian:** Cả ba máy A, B, C phải đồng bộ giờ qua chrony/NTP trước khi đo đạc. Các cờ kiểm tra dữ liệu telemetry (heartbeat, probe freshness) so sánh timestamp giữa các máy với dung sai vài giây. Nếu đồng hồ bị lệch (clock drift), telemetry sẽ bị đánh dấu không hợp lệ (`probe_valid = False`) hoặc làm sai lệch trật tự sự kiện.
 
 Chỉ cp lần đầu; nếu .env đã có thì sửa file đó, không ghi đè mật khẩu cũ. VS Code có thể ẩn .env? Dùng Ctrl+P rồi nhập .env để mở.
 
@@ -137,10 +141,15 @@ C phải in Consumer C1 running. Nếu lỗi, xem IP/mật khẩu/vhost lab và 
 Mở Terminal C số 2, kích hoạt venv, thay IP_B bằng IP thật:
 
 ```bash
-python metrics_agent.py --broker-ip IP_B
+python metrics_agent.py --broker-ip IP_B --bind IP_C
 ```
 
-Từ A mở browser http://IP_C:9109/metrics. Phải thấy JSON có ts, rtt_ms, workers; workers ban đầu có thể rỗng. API không có xác thực, chỉ dùng mạng lab tin cậy; bind IP_C cụ thể bằng --bind và chỉ cho IP_A truy cập 9109 nếu cấu hình firewall. Không mở public Internet.
+> **Bảo mật mạng Lab:** `metrics_agent.py` không có xác thực, ping 3 gói mỗi chu kỳ để lọc nhiễu RTT. Khuyến nghị chỉ bind vào địa chỉ IP của C (`--bind IP_C`) và thiết lập firewall trên C chỉ cho phép IP của A truy vấn:
+> ```bash
+> sudo ufw allow from IP_A to any port 9109 proto tcp
+> ```
+
+Từ A mở browser hoặc curl `http://IP_C:9109/metrics`. Phải thấy JSON có ts, rtt_ms, workers.
 
 Mở Terminal A số 1:
 
@@ -426,9 +435,22 @@ Script sẽ xuất ra:
 Trong các hệ thống message queue ở gần điểm bão hòa, những message tệ nhất thường bị quá tải, kẹt trong hàng đợi và timeout sau khi producer dừng phát (nằm trong `confirmed_unfinished_ids`). Nếu chỉ tính percentile trên những message may mắn hoàn thành (`completed`), p95 sẽ trông rất thấp và "đẹp giả tạo" ngay lúc hệ thống đang ngắc ngoải.
 
 `summarize.py` giải quyết triệt để vấn đề này bằng cách:
-1. Báo cáo rõ tỷ lệ chưa hoàn tất: `unfinished_ratio`.
+1. Thống nhất định nghĩa chưa hoàn tất: `unfinished_count = confirmed - completed` (đồng nhất 100% giữa summary báo cáo và Zabbix dashboard).
 2. Gán giá trị trần (Timeout Penalty = duration + drain_seconds) cho các unfinished message và tính `p95_ms_with_timeout_penalty`.
-3. Đồng bộ hóa cửa sổ đo: Tách riêng `steady_state` (cắt bỏ warmup và cooldown) và publish window, loại bỏ nhiễu từ giai đoạn drain.
+3. Trong kiểm chứng Định luật Little, $W$ sử dụng độ trễ có phạt timeout (`w_mean_latency_seconds`) để phản ánh trung thực độ phình trễ khi hệ thống nghẽn.
+4. Đồng bộ hóa cửa sổ đo: Tách riêng `steady_state` (cắt bỏ warmup và cooldown) và publish window, loại bỏ nhiễu từ giai đoạn drain.
+
+### Phân biệt Nghẽn Producer (Sync-Confirm Ceiling) và Bão hòa Hệ thống (Knee Point)
+
+Một cạm bẫy thực nghiệm kinh điển trong đo đạc RabbitMQ: `producer.py` bật `ch.confirm_delivery()` trên `BlockingConnection`, nghĩa là mỗi lệnh publish sẽ đồng bộ chờ Broker gửi xác nhận (ack) qua mạng rồi mới publish tiếp.
+- Do đó, trần tốc độ phát thực tế của Producer bị giới hạn cơ học bởi: $\text{Rate}_{\max} \approx \frac{1}{\text{RTT}_{\text{confirm}}}$.
+- Nếu bạn đặt `--rate 100` trong khi RTT + confirm tốn 20ms, Producer chỉ phát được tối đa 50 msg/s.
+- Nếu lấy rate cấu hình làm trục x, đồ thị sẽ tưởng nhầm rằng hệ thống bão hòa ở 50 msg/s ("bão hòa giả" do Producer, không phải do RabbitMQ hay Consumer)!
+
+Hệ thống sweep của chúng ta xử lý vấn đề này rạch ròi:
+- [summarize_sweep.py](file:///c:/Users/Duc%20Thinh/Documents/H%E1%BB%8Dc%20t%E1%BA%ADp/NT531-%C4%90%C3%A1nh%20gi%C3%A1%20hi%E1%BB%87u%20n%C4%83ng/%C4%90%E1%BB%93%20%C3%81n/nt531-zabbix/summarize_sweep.py) và [plot_sweep.py](file:///c:/Users/Duc%20Thinh/Documents/H%E1%BB%8Dc%20t%E1%BA%ADp/NT531-%C4%90%C3%A1nh%20gi%C3%A1%20hi%E1%BB%87u%20n%C4%83ng/%C4%90%E1%BB%93%20%C3%81n/nt531-zabbix/plot_sweep.py) **bắt buộc dùng rate đo được thực tế** (`measured_offered_rate`) làm trục $x$, không dùng rate cấu hình.
+- Tự động gắn cờ `producer_limited = True` khi tốc độ phát thực tế bị tụt dưới $92\%$ so với rate đặt hoặc có `load_limited_slots > 0`.
+- Trên đồ thị, các điểm bị nghẽn do Producer được đánh dấu riêng biệt (tam giác màu cam) và có đường gióng trần Producer confirm limit riêng, tách biệt hoàn toàn với vạch Consumer Saturation Knee Point màu đỏ.
 
 ## 13. Cơ sở lý thuyết: Mô hình Hàng đợi M/M/c & Định luật Little cho NT531
 

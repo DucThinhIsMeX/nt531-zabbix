@@ -90,6 +90,51 @@ class CoreTests(unittest.TestCase):
         self.assertAlmostEqual(little['relative_error'], 0.0)
         self.assertEqual(little['status'], 'verified_stationary')
 
+    def test_littles_law_penalized_w(self):
+        # 10 confirmed messages: 8 complete at 100ms, 2 unfinished (ceiling = (10+10)*1000 = 20,000ms)
+        events = [dict(event='attempted', message_id=f'k{i}', ts=i) for i in range(10)]
+        events += [dict(event='confirmed', message_id=f'k{i}', ts=i) for i in range(10)]
+        for i in range(8):
+            events.append(dict(event='completed', message_id=f'k{i}', ts=i + 0.1, latency_ms=100.0))
+        r = summarize(events, dict(run_id='pen_w_test', start_ts=0, duration=10, drain_seconds=10, status='finished'))
+        little = r['littles_law']
+        # Survivor-only W is 0.1s
+        self.assertAlmostEqual(little['w_survivors_mean_latency_seconds'], 0.1)
+        # Penalized W is: (8*100 + 2*20000)/10 / 1000 = 4.08s
+        self.assertAlmostEqual(little['w_penalized_mean_latency_seconds'], 4.08)
+        # Primary W must use penalized W to expose saturation delay
+        self.assertAlmostEqual(little['w_mean_latency_seconds'], 4.08)
+
+    def test_producer_limited_detection(self):
+        from summarize_sweep import aggregate_sweep
+        # Simulate run where target was 100 msg/s, but measured was 40 msg/s due to sync confirms
+        run_manifest = {'run_id': 'mock_100', 'rate': 100.0, 'duration': 60}
+        run_summary = {
+            'offered_rate_in_publish_window': 40.0,
+            'completed_rate_in_publish_window': 39.5,
+            'p50_ms_completed_cohort': 15.0,
+            'p95_ms_completed_cohort': 25.0,
+            'p95_ms_with_timeout_penalty': 25.0,
+            'p99_ms_with_timeout_penalty': 28.0,
+            'unfinished_ratio': 0.01,
+            'unfinished_count': 1,
+            'confirmed_unfinished_ids': ['mock_100_00000001']
+        }
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / 'mock_run'
+            f.mkdir()
+            (f / 'manifest.json').write_text(json.dumps(run_manifest))
+            (f / 'summary.json').write_text(json.dumps(run_summary))
+            res = aggregate_sweep([f])
+            self.assertEqual(len(res['load_points']), 1)
+            point = res['load_points'][0]
+            self.assertEqual(point['target_rate'], 100.0)
+            self.assertEqual(point['measured_offered_rate'], 40.0)
+            self.assertEqual(point['offered_rate'], 40.0)  # Primary x-axis is 40, not 100!
+            self.assertTrue(point['producer_limited'])
+
 
 if __name__ == '__main__':
     unittest.main()

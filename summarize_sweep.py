@@ -31,13 +31,25 @@ def aggregate_sweep(run_folders):
                 mean_rtt = mean(r_list)
                 mean_proc = mean(p_list)
 
-        offered = float(manifest.get('rate', summary.get('offered_rate_in_publish_window', 0.0)))
+        target_rate = float(manifest.get('rate', 0.0))
+        measured_offered = float(summary.get('offered_rate_in_publish_window', 0.0))
+        effective_offered = measured_offered if measured_offered > 0 else target_rate
+
+        load_limited_slots = summary.get('load_limited_slots', 0)
+        producer_limited = (target_rate > 0 and (measured_offered / target_rate < 0.92)) or (load_limited_slots > 0)
+        producer_throttled_ratio = round(measured_offered / target_rate, 2) if target_rate > 0 else 1.0
+
         steady = summary.get('steady_state', {})
         little = summary.get('littles_law', {})
 
         rows.append({
             'run_id': manifest.get('run_id'),
-            'offered_rate': offered,
+            'target_rate': target_rate,
+            'measured_offered_rate': measured_offered,
+            'offered_rate': effective_offered,  # primary x-axis is measured rate!
+            'producer_limited': producer_limited,
+            'producer_throttled_ratio': producer_throttled_ratio,
+            'load_limited_slots': load_limited_slots,
             'completed_rate': summary.get('completed_rate_in_publish_window', 0.0),
             'steady_offered_rate': steady.get('offered_rate'),
             'steady_completed_rate': steady.get('completed_rate'),
@@ -62,18 +74,21 @@ def aggregate_sweep(run_folders):
 
     rows.sort(key=lambda r: r['offered_rate'])
 
-    # Detect empirical saturation knee point
-    knee_point_rate = None
+    # Distinguish between system/consumer saturation and producer client-side throttle
+    consumer_knee_rate = None
+    producer_ceiling_rate = None
     for r in rows:
-        if r['offered_rate'] > 0:
+        if r['producer_limited'] and producer_ceiling_rate is None:
+            producer_ceiling_rate = r['measured_offered_rate']
+        if r['offered_rate'] > 0 and consumer_knee_rate is None:
             delivery_ratio = r['completed_rate'] / r['offered_rate']
             if delivery_ratio < 0.90 or r['unfinished_ratio'] > 0.05:
-                knee_point_rate = r['offered_rate']
-                break
+                consumer_knee_rate = r['offered_rate']
 
     return {
         'runs_count': len(rows),
-        'saturation_knee_point_offered_rate': knee_point_rate,
+        'saturation_knee_point_offered_rate': consumer_knee_rate,
+        'producer_ceiling_rate': producer_ceiling_rate,
         'load_points': rows
     }
 
@@ -111,17 +126,23 @@ def main():
 
     print(f'Aggregated {len(result["load_points"])} load points into {a.output} and {a.output_csv}')
     print('\n--- LOAD SWEEP SUMMARY TABLE ---')
-    print(f'{"Offered":<9} | {"Throughput":<11} | {"p95 (surv)":<11} | {"p95 (penalized)":<15} | {"Unfinished %":<13} | {"Backlog":<8} | {"L (pred vs obs)"}')
+    print(f'{"Target":<7} | {"Measured":<9} | {"Throughput":<11} | {"p95 (surv)":<11} | {"p95 (pen)":<11} | {"Unfinished":<11} | {"Backlog":<8} | {"Status"}')
     print('-' * 95)
     for r in result['load_points']:
         p95_surv = f"{r['p95_ms_completed']:.1f}ms" if r['p95_ms_completed'] else "N/A"
         p95_pen = f"{r['p95_ms_with_penalty']:.1f}ms" if r['p95_ms_with_penalty'] else "N/A"
         unf_pct = f"{r['unfinished_ratio']*100:.1f}%"
         backlog_str = f"{r['mean_backlog']:.1f}" if r['mean_backlog'] is not None else "N/A"
-        l_str = f"{r['little_l_predicted']:.2f} vs {r['little_l_observed']:.2f}" if (r['little_l_predicted'] is not None and r['little_l_observed'] is not None) else "N/A"
-        print(f"{r['offered_rate']:<9.1f} | {r['completed_rate']:<11.1f} | {p95_surv:<11} | {p95_pen:<15} | {unf_pct:<13} | {backlog_str:<8} | {l_str}")
+        status = "OK"
+        if r['producer_limited']:
+            status = "PRODUCER_THROTTLED"
+        elif r['unfinished_ratio'] > 0.05 or (r['completed_rate'] / max(0.001, r['offered_rate']) < 0.9):
+            status = "CONSUMER_SATURATED"
+        print(f"{r['target_rate']:<7.1f} | {r['measured_offered_rate']:<9.1f} | {r['completed_rate']:<11.1f} | {p95_surv:<11} | {p95_pen:<11} | {unf_pct:<11} | {backlog_str:<8} | {status}")
     if result['saturation_knee_point_offered_rate']:
-        print(f"\nEmpirical Saturation Knee Point detected around offered rate: {result['saturation_knee_point_offered_rate']} msg/s")
+        print(f"\nConsumer Saturation Knee Point detected around measured load: {result['saturation_knee_point_offered_rate']:.1f} msg/s")
+    if result['producer_ceiling_rate']:
+        print(f"Producer Sync-Confirm Ceiling detected around: {result['producer_ceiling_rate']:.1f} msg/s (Producer-limited)")
 
 
 if __name__ == '__main__':

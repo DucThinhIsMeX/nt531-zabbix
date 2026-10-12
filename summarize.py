@@ -45,10 +45,15 @@ def summarize(events, manifest, snapshots=None):
 
     # 5. Little's Law Analysis: L = lambda * W
     lambda_completed = len(in_window) / duration
-    mean_latency_sec = (mean(in_window_latencies) / 1000.0) if in_window_latencies else (
+    mean_latency_survivors_sec = (mean(in_window_latencies) / 1000.0) if in_window_latencies else (
         (mean(cohort_latencies) / 1000.0) if cohort_latencies else 0.0
     )
-    l_predicted = lambda_completed * mean_latency_sec
+    mean_latency_penalized_sec = (mean(penalized_latencies) / 1000.0) if penalized_latencies else 0.0
+
+    # Effective W for Little's Law: uses penalized latency when unfinished items exist to avoid underestimation
+    w_effective_sec = mean_latency_penalized_sec if unfinished_count > 0 else mean_latency_survivors_sec
+    l_predicted = lambda_completed * w_effective_sec
+    l_predicted_survivors = lambda_completed * mean_latency_survivors_sec
 
     l_observed = None
     l_rel_error = None
@@ -120,12 +125,15 @@ def summarize(events, manifest, snapshots=None):
         # Little's Law verification
         'littles_law': {
             'lambda_completed_rate': lambda_completed,
-            'w_mean_latency_seconds': mean_latency_sec,
+            'w_mean_latency_seconds': w_effective_sec,
+            'w_survivors_mean_latency_seconds': mean_latency_survivors_sec,
+            'w_penalized_mean_latency_seconds': mean_latency_penalized_sec,
             'l_predicted_items': l_predicted,
+            'l_predicted_survivors_items': l_predicted_survivors,
             'l_observed_items': l_observed,
             'relative_error': l_rel_error,
             'status': littles_law_status,
-            'note': 'L = lambda * W valid in stationary state. Divergence indicates non-stationary queue growth under saturation.'
+            'note': 'W uses timeout-penalized latency to eliminate survivorship bias at saturation. L = lambda * W valid in stationary state; divergence indicates queue accumulation under saturation.'
         },
 
         'note': 'Percentiles report both completed survivors and conservative timeout-penalized figures to eliminate survivorship bias at saturation.'

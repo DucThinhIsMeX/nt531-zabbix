@@ -18,17 +18,26 @@ def plot_load_curves(sweep_data, output_path):
     p95_pen = [p['p95_ms_with_penalty'] if p['p95_ms_with_penalty'] is not None else float('nan') for p in points]
     unfinished_pct = [p['unfinished_ratio'] * 100 for p in points]
     knee = sweep_data.get('saturation_knee_point_offered_rate')
+    prod_ceil = sweep_data.get('producer_ceiling_rate')
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     ((ax1, ax2), (ax3, ax4)) = axes
 
     # 1. Throughput Curve
-    ax1.plot(x, x, 'k--', alpha=0.5, label='Ideal 100% capacity (y = x)')
+    ax1.plot(x, x, 'k--', alpha=0.5, label='Ideal capacity (y = x)')
     ax1.plot(x, throughput, 'b-o', linewidth=2, label='Measured Throughput')
+
+    prod_limited_x = [p['offered_rate'] for p in points if p.get('producer_limited')]
+    prod_limited_y = [p['completed_rate'] for p in points if p.get('producer_limited')]
+    if prod_limited_x:
+        ax1.scatter(prod_limited_x, prod_limited_y, color='darkorange', marker='^', s=120, zorder=5,
+                    label='Producer-limited (Sync confirm lock)')
     if knee:
-        ax1.axvline(knee, color='red', linestyle=':', label=f'Saturation knee (~{knee} msg/s)')
+        ax1.axvline(knee, color='red', linestyle=':', label=f'Consumer saturation (~{knee:.1f} msg/s)')
+    if prod_ceil and (not knee or abs(prod_ceil - knee) > 2):
+        ax1.axvline(prod_ceil, color='darkorange', linestyle='--', label=f'Producer confirm limit (~{prod_ceil:.1f} msg/s)')
     ax1.set_title('Offered Load vs Throughput (Completed Rate)')
-    ax1.set_xlabel('Offered Load (msg/s)')
+    ax1.set_xlabel('Measured Offered Load (msg/s)')
     ax1.set_ylabel('Completed Rate (msg/s)')
     ax1.grid(True, alpha=0.3)
     ax1.legend()
@@ -40,7 +49,7 @@ def plot_load_curves(sweep_data, output_path):
     if knee:
         ax2.axvline(knee, color='red', linestyle=':', alpha=0.7)
     ax2.set_title('Offered Load vs Latency (Hockey-Stick Curve)')
-    ax2.set_xlabel('Offered Load (msg/s)')
+    ax2.set_xlabel('Measured Offered Load (msg/s)')
     ax2.set_ylabel('Latency (ms)')
     ax2.grid(True, alpha=0.3)
     ax2.legend()
@@ -50,7 +59,7 @@ def plot_load_curves(sweep_data, output_path):
     if knee:
         ax3.axvline(knee, color='red', linestyle=':', alpha=0.7)
     ax3.set_title('Offered Load vs Unfinished / Timeout Messages (%)')
-    ax3.set_xlabel('Offered Load (msg/s)')
+    ax3.set_xlabel('Measured Offered Load (msg/s)')
     ax3.set_ylabel('Unfinished Ratio (%)')
     ax3.grid(True, alpha=0.3)
     ax3.legend()
