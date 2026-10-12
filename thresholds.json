@@ -1,0 +1,6 @@
+{
+  "backlog_max": 20,
+  "p95_max_ms": 300,
+  "rtt_max_ms": 30,
+  "processing_max_ms": 100
+}
