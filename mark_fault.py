@@ -4,7 +4,7 @@ from common import log
 
 p = argparse.ArgumentParser(description='Manual ground truth; not read by classifier')
 p.add_argument('--run-id', required=True)
-p.add_argument('--label', required=True, choices=['NORMAL','NETWORK_DELAY','CONSUMER_SLOW','CONSUMER_DOWN','MIXED','TRANSITION'])
+p.add_argument('--label', required=True, choices=['NORMAL','NETWORK_DELAY','NETWORK_LOSS','NETWORK_RATE','CONSUMER_SLOW','CONSUMER_DOWN','MIXED','TRANSITION'])
 a = p.parse_args()
 folder = Path('data/runs')/a.run_id
 if not folder.exists():

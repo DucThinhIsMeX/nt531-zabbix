@@ -15,12 +15,24 @@ if not rows:
     p.error('No snapshot rows')
 start = float(rows[0]['ts'])
 x = [float(r['ts'])-start for r in rows]
+keys_list = [
+    ('backlog', 'unfinished_count'),
+    ('offered_rate', 'completed_rate'),
+    ('p95_ms', 'processing_ms'),
+    ('rtt_ms',)
+]
+titles = [
+    'Queue Backlog and Unfinished Messages',
+    'Throughput vs Offered Rate (msg/s)',
+    'Application Latency p95 and Processing Time (ms)',
+    'C to B ICMP RTT (ms)'
+]
 fig, axes = plt.subplots(4, 1, figsize=(11, 10), sharex=True)
-for ax, keys, title in zip(axes, [('backlog',),('completed_rate',),('p95_ms','processing_ms'),('rtt_ms',)],
-                           ['Request backlog', 'Unique completions per second', 'Application and processing latency (ms)', 'C to B ICMP RTT (ms)']):
+for ax, keys, title in zip(axes, keys_list, titles):
     for key in keys:
-        values = [float(r[key]) if r[key] else float('nan') for r in rows]
-        ax.plot(x, values, label=key)
+        values = [float(r[key]) if r.get(key) else float('nan') for r in rows]
+        if any(not (v != v) for v in values):  # check if at least one non-nan value exists
+            ax.plot(x, values, label=key)
     for fault in read_events(folder/'faults.jsonl'):
         ax.axvline(fault['ts']-start, color='gray', linestyle='--', alpha=.6)
     ax.set_title(title)

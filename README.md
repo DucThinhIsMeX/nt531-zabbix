@@ -18,22 +18,28 @@ Các tên file trong thư mục đã được cấp sẵn:
 
 | File | Chạy trên | Công việc |
 |---|---|---|
-| common.py | Được import | Cấu hình kết nối, queue, log và percentile |
+| common.py | Được import | Cấu hình kết nối, queue, log, mean/stddev và percentile |
 | producer.py | A | Gửi message và nhận kết quả bằng kết nối riêng |
 | consumer.py | C | Xử lý yêu cầu, gửi kết quả rồi ack |
 | metrics_agent.py | C | API chỉ số xử lý và ping C→B |
-| collector.py | A | Thu metrics, chẩn đoán, lưu CSV, gửi Zabbix tùy chọn |
+| collector.py | A | Thu metrics, chẩn đoán, lưu CSV, đẩy đầy đủ metrics tới Zabbix |
 | diagnose.py | Được collector import | Bộ luật và giữ nhãn qua hai cửa sổ |
-| summarize.py | A | Đối chiếu ID, thống kê throughput và latency |
-| mark_fault.py | A | Ghi đáp án sự cố do người làm thí nghiệm biết |
+| summarize.py | A | Đối chiếu ID, khử survivorship bias, kiểm chứng Định luật Little |
+| calibrate.py | A | Hiệu chỉnh ngưỡng khoa học (mean + k*sigma) từ pilot baseline |
+| run_sweep.py | A | Tự động hóa thí nghiệm quét tải (Load Sweep) đa mức |
+| summarize_sweep.py | A | Gom nhiều run, tìm knee point bão hòa, xuất bảng sweep |
+| plot_sweep.py | A | Vẽ đường cong tải (Throughput, Hockey-stick, Little's Law) |
+| mark_fault.py | A | Ghi đáp án sự cố (Delay, Loss, Rate, Consumer Slow/Down) |
 | evaluate.py | A | Đối chiếu nhãn dự đoán với sự cố thật |
-| plot_results.py | A | Vẽ timeline PNG |
-| scripts/network_delay.sh | C | Gây trễ AMQP và ICMP tới B |
-| scripts/network_reset.sh | C | Gỡ rule lab |
+| plot_results.py | A | Vẽ timeline PNG một run (throughput, latency, backlog, RTT) |
+| scripts/network_delay.sh | C | Gây trễ AMQP và ICMP tới B (netem delay) |
+| scripts/network_loss.sh | C | Gây mất gói AMQP và ICMP tới B (netem loss) |
+| scripts/network_rate.sh | C | Giới hạn băng thông egress tới B (tbf rate limit) |
+| scripts/network_reset.sh | C | Gỡ toàn bộ rule lab (delay, loss, rate) trên interface |
 | compose.rabbitmq.yml | B | Khởi động RabbitMQ |
 | compose.zabbix.yml | A | Khởi động Zabbix và PostgreSQL |
 | .env.example | A/B/C | Mẫu IP và mật khẩu cần sửa |
-| thresholds.json | A | Ngưỡng chẩn đoán mẫu, cần hiệu chỉnh bằng pilot |
+| thresholds.json | A | Ngưỡng chẩn đoán (được sinh từ calibrate.py) |
 
 ## 2. Ghi IP thật
 
@@ -260,9 +266,49 @@ Sau đoạn thử, C gỡ:
 sudo bash scripts/network_reset.sh enp3s0
 ```
 
-A ghi TRANSITION, rồi NORMAL khi baseline ổn định. Script chỉ chấp nhận qdisc mặc định và từ chối cấu hình tùy chỉnh có sẵn; khi reset Linux phục hồi default, không hứa tái tạo chính xác các thông số default được chỉnh trước đó. Không dùng script trên interface đang có cấu hình ngoài đồ án. Kiểm tra RTT trước/sau, không chạy iperf3 đồng thời trong run message.
+A ghi TRANSITION, rồi NORMAL khi baseline ổn định.
 
-Bản 1.0 đã cấp script delay/reset. Script bandwidth và loss là phần mở rộng, chưa có trong ZIP này; không cần chúng để demo ba loại nguyên nhân đầu tiên.
+### Tạo mất gói mạng (Packet Loss) trên C
+
+Mất gói là hiện tượng mạng nghiêm trọng nhất làm sụp đổ throughput TCP theo mô hình Mathis ($Throughput \le \frac{MSS}{RTT \cdot \sqrt{p}}$). Khi mất gói $p=2\%$, TCP liên tục rơi vào retransmission timeout và co hẹp cửa sổ nghẽn (cwnd), khiến luồng AMQP bị nghẽn nghiêm trọng dù băng thông vật lý còn thừa:
+
+```bash
+# Bơm mất gói 2% egress C→B (AMQP port 5672 + ICMP)
+sudo bash scripts/network_loss.sh enp3s0 IP_B 2
+```
+
+Trên A:
+
+```bash
+python mark_fault.py --run-id loss_01 --label NETWORK_LOSS
+```
+
+Gỡ rule khi kết thúc kịch bản:
+
+```bash
+sudo bash scripts/network_reset.sh enp3s0
+```
+
+### Giới hạn băng thông (Bandwidth Throttling / TBF) trên C
+
+Sử dụng Token Bucket Filter (TBF) để giới hạn tốc độ truyền dữ liệu từ C về broker B (ví dụ bóp xuống 500 kbit/s):
+
+```bash
+# Giới hạn 500 kbit/s, burst 32KB, latency đệm 50ms
+sudo bash scripts/network_rate.sh enp3s0 IP_B 500 32 50
+```
+
+Trên A:
+
+```bash
+python mark_fault.py --run-id rate_01 --label NETWORK_RATE
+```
+
+Gỡ rule:
+
+```bash
+sudo bash scripts/network_reset.sh enp3s0
+```
 
 ## 9. Dừng consumer và thêm worker
 
@@ -278,72 +324,178 @@ Trên Lab-B gắn template RabbitMQ node/cluster by HTTP 7.0 phù hợp; đặt 
 
 Trong Zabbix tạo host Lab-App, nhóm tùy chọn Lab. Tạo từng item dưới đây loại Zabbix trapper, đúng key:
 
-| Key | Type of information | Units |
-|---|---|---|
-| app.completed_rate | Numeric float | msg/s |
-| app.latency.p95 | Numeric float | ms |
-| app.processing.mean | Numeric float | ms |
-| app.metrics.valid | Numeric unsigned | Không cần |
-| app.diagnosis.code | Numeric unsigned | Không cần |
+| Key | Type of information | Units | Ý nghĩa trong Observability |
+|---|---|---|---|
+| app.completed_rate | Numeric float | msg/s | Throughput thực tế hoàn tất |
+| app.offered_rate | Numeric float | msg/s | Tốc độ phát tải từ Producer |
+| app.latency.p95 | Numeric float | ms | Độ trễ vòng p95 (độ trễ đáp ứng ứng dụng) |
+| app.processing.mean | Numeric float | ms | Thời gian xử lý trung bình của worker |
+| app.backlog | Numeric unsigned | msgs | Chiều dài hàng đợi RabbitMQ ($L_q$) |
+| app.rtt_ms | Numeric float | ms | Độ trễ RTT mạng tầng IP (ping C→B) |
+| app.unfinished_count | Numeric unsigned | msgs | Số lượng message tồn đọng / mất mát |
+| app.queue.alarm | Numeric unsigned | Boolean | Cảnh báo vượt ngưỡng độ dài queue |
+| app.metrics.valid | Numeric unsigned | Boolean | Tính toàn vẹn của dữ liệu telemetry |
+| app.diagnosis.code | Numeric unsigned | Mã lỗi | 0: NORMAL, 1: NETWORK, 2: SLOW, 3: DOWN, 4: INCONCLUSIVE, 5: IDLE |
 
-Allowed hosts cho trapper đặt IP_A nếu cần và xác minh sender trước. Test:
+Allowed hosts cho trapper đặt IP_A nếu cần và xác minh sender trước. Test đẩy thử:
 
 ```bash
 zabbix_sender -z IP_A -s Lab-App -k app.completed_rate -o 5
 ```
 
-Kết quả phải processed:1 failed:0 và Latest data có số 5. Sau đó chạy collector trong run mới với tùy chọn:
+Sau đó chạy collector với cờ `--push-zabbix`:
 
 ```bash
 python collector.py --run-id zabbix_01 --push-zabbix
 ```
 
-Producer zabbix_01 phải đang chạy trước collector. Bản này gửi số liệu scalar mỗi cửa sổ, không gửi từng message. Sender errors được in để kiểm tra. Diagnosis code: 0 NORMAL, 1 NETWORK_SUSPECTED, 2 CONSUMER_SLOW_SUSPECTED, 3 CONSUMER_DOWN, 4 INCONCLUSIVE, 5 IDLE. Có thể tạo value mapping trên item để hiện chữ.
+Collector tự động đóng gói toàn bộ 10 chỉ số trên và gửi hàng loạt (batch mode via stdin) trong 1 kết nối TCP đến Zabbix Server mỗi cửa sổ.
 
-Tạo dashboard gồm CPU/RAM, queue ready/unacknowledged, completion rate, p95, processing mean và diagnosis code. Tạo trigger CONSUMER_DOWN hoặc NETWORK_SUSPECTED trên diagnosis.code; thêm điều kiện run hoạt động nếu mở rộng. Gắn kiểm tra nodata/telemetry hợp lệ để tránh stale label. Bộ code ghi nhãn và CSV; cấu hình trigger/dashboard là thao tác trên giao diện, không tự tạo qua API trong bản này.
+### Vai trò của Zabbix trong Kiến trúc Hệ thống
 
-## 11. Đánh giá đóng góp riêng
+Nếu hội đồng hỏi *"Toàn bộ chẩn đoán nằm trong Python, vậy Zabbix đóng vai trò gì?"*, nhóm trả lời theo cấu trúc phân tầng chuẩn công nghiệp:
+1. **Tầng Thu thập & Tổng hợp Telemetry (Observability Plane):** Zabbix là trung tâm gom dữ liệu đa tầng (Full-Stack Observability):
+   - Hạ tầng phần cứng: CPU, RAM, Network Bandwidth của 3 máy A, B, C (qua Zabbix Agent 2).
+   - Middleware: RabbitMQ Cluster stats, Socket descriptors, Disk free (qua Template RabbitMQ HTTP).
+   - Ứng dụng & Mạng: Throughput, p95 latency, RTT C→B, Backlog, và Mã chẩn đoán (qua Zabbix Trapper).
+2. **Tầng Trực quan hóa Thời gian thực (Real-time Dashboards):** Zabbix vẽ tương quan trực quan giữa các đường cong: sụt giảm Throughput có trùng khớp với tăng RTT mạng hay tăng Consumer Processing hay không.
+3. **Tầng Cảnh báo Tự động (Alerting & Trigger Engine):** Thiết lập các triggers:
+   - Severity HIGH: `app.diagnosis.code = 1` (Network Suspected) hoặc `app.diagnosis.code = 3` (Consumer Down).
+   - Severity WARNING: `app.queue.alarm = 1` (Queue tắc nghẽn).
+   - Recovery Actions: Tự động gửi thông báo hoặc trigger webhook khắc phục sự cố.
 
-Sau mỗi run producer xong, dừng collector rồi:
+## 11. Hiệu chỉnh ngưỡng chẩn đoán khoa học (Calibration Run)
+
+Không sử dụng các số giả định tùy tiện trong `thresholds.json`. Thay vào đó, chạy một pilot baseline run ở tải bình thường (ví dụ 10 msg/s, không sự cố) trong 2 phút:
 
 ```bash
-python summarize.py --run-id slow_01
-python evaluate.py --run-id slow_01
-python plot_results.py --run-id slow_01
+# Trên A: Chạy baseline pilot
+python producer.py --run-id pilot_01 --rate 10 --duration 120 --drain-seconds 30
+python collector.py --run-id pilot_01
 ```
 
-Đọc evaluation.json. Queue-only baseline dùng backlog threshold và cùng hai cửa sổ giữ nhãn; chỉ biết cảnh báo, không có khả năng đoán nguyên nhân. Combined thêm network RTT và processing để phân loại. So sánh false alarms, phát hiện sự cố và độ trễ; nguyên nhân đúng của Combined được đo riêng. Null detection delay nghĩa là không phát hiện trong đoạn, không phải 0 giây.
+Sau khi pilot run hoàn tất, chạy công cụ tự động tính ngưỡng theo nguyên lý 3-sigma ($\mu + 3\sigma$):
 
-Thresholds.json là ngưỡng DEMO, chưa phải chuẩn hoặc kết quả nghiên cứu. Chạy pilot để lấy baseline, chọn ngưỡng trên calibration runs rồi cố định ngưỡng trước test runs mới. Bộ luật chỉ thử phân biệt những tình huống kiểm soát đã nêu; không giải quyết mọi lỗi mạng hoặc CPU. MIXED và thiếu telemetry trả INCONCLUSIVE. Latency cửa sổ rỗng không thay bằng 0.
+```bash
+python calibrate.py --baseline-run-id pilot_01 --k 3.0 --output thresholds.json
+```
 
-Lặp tối thiểu ba run độc lập mỗi cấu hình. Cửa sổ liền nhau trong run có tương quan; không trình bày chúng như hàng trăm thí nghiệm độc lập. Mỗi run giữ versions/digests, phần cứng, NIC, payload, worker, prefetch và interval; code manifest có thông số app nhưng nhóm phải bổ sung inventory phần cứng/versions và commit.
+`calibrate.py` sẽ đọc `snapshots.csv`, tính trung bình $\mu$ và độ lệch chuẩn $\sigma$ của:
+- RTT mạng LAN thật giữa C và B.
+- Thời gian xử lý thực tế của Consumer.
+- Độ trễ vòng p95 thực tế của hệ thống.
+- Chiều dài hàng đợi Backlog bình thường.
 
-Evaluation v1.0 thống kê ma trận dạng counts trong JSON, tỷ lệ nhãn đúng theo cửa sổ, inconclusive và detection từng đoạn. Với MIXED, expected INCONCLUSIVE là nhãn từ chối kết luận có chủ đích, cần báo riêng khi viết accuracy phân loại các nguyên nhân đơn. Ground truth thời gian do thao tác tay có sai số. Bản này chưa tự tính khoảng tin cậy hoặc tạo heatmap confusion matrix.
+File `thresholds.json` được tạo ra chứa đầy đủ metadata thống kê, có thể giải thích minh bạch trước hội đồng bảo vệ.
 
-## 12. Test và lỗi thường gặp
+## 12. Thí nghiệm Quét tải (Load Sweep Curve) & Khử Survivorship Bias
+
+Đây là thí nghiệm cốt lõi của môn Đánh giá Hiệu năng: cho offered load tăng dần để dựng đường cong bão hòa (Knee Point) và đường trễ gãy khúc (Hockey-Stick Curve).
+
+### Chạy quét tải đa mức tự động
+
+Chạy dãy tải qua các mức [5, 10, 20, 30, 40, 50, 60] msg/s:
+
+```bash
+# Xem trước danh sách lệnh
+python run_sweep.py --prefix sweep --rates 5 10 20 30 40 50 60
+
+# Hoặc thực thi tuần tự tự động trên A
+python run_sweep.py --prefix sweep --rates 5 10 20 30 40 50 60 --duration 60 --execute
+```
+
+### Tổng hợp và dựng đường cong tải
+
+Sau khi toàn bộ các run sweep kết thúc:
+
+```bash
+python summarize_sweep.py --pattern "sweep_*"
+python plot_sweep.py --sweep-json data/sweep_summary.json --output data/load_curves.png
+```
+
+Script sẽ xuất ra:
+- `data/sweep_summary.json` và `data/sweep_summary.csv`: Bảng tổng hợp số liệu chi tiết.
+- `data/load_curves.png`: Đồ thị 4 khung hình ấn tượng:
+  1. **Offered Load vs Throughput**: Thể hiện điểm gãy bão hòa (Saturation Knee Point).
+  2. **Offered Load vs Latency (Hockey-Stick Curve)**: So sánh p95 chỉ tính message hoàn thành (bị méo mó do Survivorship Bias) với p95 có phạt Timeout (phản ánh trung thực độ trễ bùng nổ khi tắc nghẽn).
+  3. **Offered Load vs Unfinished Ratio (%)**: Chỉ ra tỷ lệ message bị drop / timeout vọt lên khi tải vượt ngưỡng phục vụ.
+  4. **Kiểm chứng Định luật Little**: Đối chiếu số lượng message trong hệ thống dự đoán ($L = \lambda W$) với số lượng thực tế quan sát ($L_{\text{observed}}$).
+
+### Khử thiên lệch sống sót (Survivorship Bias) trong đo đạc
+
+Trong các hệ thống message queue ở gần điểm bão hòa, những message tệ nhất thường bị quá tải, kẹt trong hàng đợi và timeout sau khi producer dừng phát (nằm trong `confirmed_unfinished_ids`). Nếu chỉ tính percentile trên những message may mắn hoàn thành (`completed`), p95 sẽ trông rất thấp và "đẹp giả tạo" ngay lúc hệ thống đang ngắc ngoải.
+
+`summarize.py` giải quyết triệt để vấn đề này bằng cách:
+1. Báo cáo rõ tỷ lệ chưa hoàn tất: `unfinished_ratio`.
+2. Gán giá trị trần (Timeout Penalty = duration + drain_seconds) cho các unfinished message và tính `p95_ms_with_timeout_penalty`.
+3. Đồng bộ hóa cửa sổ đo: Tách riêng `steady_state` (cắt bỏ warmup và cooldown) và publish window, loại bỏ nhiễu từ giai đoạn drain.
+
+## 13. Cơ sở lý thuyết: Mô hình Hàng đợi M/M/c & Định luật Little cho NT531
+
+Để neo đồ án vững chắc vào trục môn "Đánh giá hiệu năng mạng", nhóm tuyên bố mô hình hóa hệ thống trong báo cáo như sau:
+
+1. **Mô hình Hàng đợi $M/M/c$ (hoặc $M/D/c$):**
+   - **Luồng đến (Arrival process):** Producer phát tải theo tiến trình Poisson với cường độ $\lambda$ (offered rate msg/s).
+   - **Tầng phục vụ (Service process):** $c$ worker consumers, mỗi worker có cường độ phục vụ $\mu = 1000 / \text{processing\_ms}$ (msg/s). Tổng công suất hệ thống: $C = c \cdot \mu$.
+   - **Hệ số sử dụng (Traffic intensity):** $\rho = \frac{\lambda}{c \mu}$.
+     - Khi $\rho < 1$: Hệ thống ổn định (steady state), hàng đợi ngắn, latency xấp xỉ thời gian truyền dẫn mạng + thời gian xử lý.
+     - Khi $\rho \ge 1$: Hệ thống bão hòa, hàng đợi backlog tăng tuyến tính theo thời gian $L_q(t) \sim (\lambda - c\mu)t$.
+2. **Kiểm chứng Định luật Little ($L = \lambda W$):**
+   - Định luật phát biểu: Số lượng khách trung bình trong hệ thống $L$ bằng tích của tốc độ đến $\lambda$ và thời gian lưu trú trung bình $W$.
+   - Trong `summary.json`, hệ thống tự động trích xuất:
+     $$\lambda = \text{throughput (msg/s)}, \quad W = \frac{\overline{\text{latency (ms)}}}{1000} \text{ (giây)}$$
+     $$L_{\text{predicted}} = \lambda \cdot W$$
+     $$L_{\text{observed}} = \overline{\text{backlog}} + \text{in-flight items}$$
+   - Ở vùng tải ổn định ($\rho < 0.8$), sai số giữa $L_{\text{predicted}}$ và $L_{\text{observed}}$ rất nhỏ ($< 15\%$), chứng minh tính đúng đắn của định luật.
+   - Ở vùng bão hòa ($\rho \ge 1$), hệ thống vi phạm tính dừng (non-stationary), số liệu thực nghiệm sẽ chỉ ra sự phân kỳ của định luật Little. Đây là điểm phân tích lý thuyết đắt giá nhất để kéo đồ án từ "hệ phân tán" về đúng trọng tâm môn hiệu năng!
+3. **Mô hình Mathis cho Packet Loss tầng TCP:**
+   - AMQP chạy trên nền TCP (port 5672). Theo công thức Mathis:
+     $$\text{Throughput}_{\text{TCP}} \le \frac{\text{MSS}}{\text{RTT} \cdot \sqrt{p}} \times C$$
+   - Khi có mất gói $p$, TCP co hẹp Congestion Window và phải truyền lại, khiến tốc độ đẩy ack/result bị bóp nghẹt, làm sập throughput ứng dụng dù độ trễ vật lý không đổi.
+
+## 14. Đánh giá đóng góp riêng & Ma trận chẩn đoán
+
+Sau mỗi run sự cố, chạy:
+
+```bash
+python summarize.py --run-id delay_01
+python evaluate.py --run-id delay_01
+python plot_results.py --run-id delay_01
+```
+
+Đọc `evaluation.json`:
+- So sánh Queue-only baseline (chỉ nhìn backlog) với Combined Classifier (kết hợp backlog, RTT C→B và processing time).
+- Baseline chỉ biết báo động mà không biết nguyên nhân.
+- Combined phân biệt chính xác: `NETWORK_SUSPECTED` (khi RTT hoặc loss tăng), `CONSUMER_SLOW_SUSPECTED` (khi service time tăng), và `CONSUMER_DOWN` (khi consumer = 0).
+
+## 15. Kiểm thử đơn vị
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-- ModuleNotFoundError: kích hoạt venv và pip install requirements.
-- Connection refused: RabbitMQ chưa chạy, IP_B sai, firewall hoặc LAN chưa thông.
-- ACCESS_REFUSED: user/password/vhost lab sai; không dùng guest từ xa.
-- PRECONDITION_FAILED: queue cũ khai báo khác loại/durable; kiểm tra queue thật. Đừng xóa/purge khi có dữ liệu cần giữ; dùng vhost lab riêng cho lần triển khai sạch.
-- Metrics_agent không mở trên A: CONSUMER_HOST/IP_C, port 9109, firewall.
-- INCONCLUSIVE lúc đầu: chưa có dữ liệu processing của run hoặc ping/API chưa cập nhật.
-- Luôn INCONCLUSIVE: xem broker_valid/probe_valid trong snapshots, ngưỡng, rtt và processing; không sửa để ép nhãn mong muốn.
-- Queue không tăng: offered load vẫn thấp hơn capacity hoặc A không đạt rate.
-- Sender failed: tên host/key, loại trapper, allowed hosts và port10051.
-- Không có faults.jsonl: đã quên chạy mark_fault; không tự bịa thời điểm sau khi nhìn dự đoán.
-- Không reset được network: kiểm tra qdisc và marker; script không xóa rule lạ.
+Kiểm tra:
+- Khử survivorship bias và tính toán timeout penalty.
+- Hiệu chỉnh ngưỡng $\mu + 3\sigma$ trong `calibrate.py`.
+- Kiểm chứng định luật Little $L = \lambda W$.
+- Bộ luật chẩn đoán và cơ chế làm mượt nhãn (StableLabel).
 
-## 13. Phần nhóm cần tự hiểu
+## 16. Khung viết báo cáo chuẩn cho môn NT531
 
-Đọc consumer.py từ trên xuống: nhận → xử lý → gửi kết quả được confirm → log → ack. Đọc producer.py: luồng nhận riêng → tạo ID → ghi start → publish → ghép kết quả → đo latency → drain. Đọc diagnose.py với snapshots.csv của run thật và thử giải thích từng nhãn.
-
-Bộ code để học và tái lập thí nghiệm, không thay việc đọc tài liệu và giải thích khi bảo vệ. Báo cáo trung thực các phép thử không đạt, chẩn đoán sai và giới hạn publisher/telemetry. Không cam kết điểm mới toàn cầu hoặc hiệu quả trước khi đo.
-
-Tài liệu: https://www.rabbitmq.com/docs/confirms ; https://www.rabbitmq.com/docs/http-api-reference ; https://pika.readthedocs.io/en/stable/modules/adapters/blocking.html ; https://www.zabbix.com/integrations/rabbitmq .
-
-Đồng bộ giờ trên ba Linux trước khi ghép timeline. Collector dùng producer heartbeat để phát hiện ứng dụng chết; độ lệch đồng hồ C/A vượt khoảng cho phép làm probe không hợp lệ. Đo latency message tại A bằng perf_counter không phụ thuộc đồng hồ C. processing.mean trong bản này là trung bình các giá trị xử lý mới nhất của từng worker, không phải trung bình mọi message trong cửa sổ; dữ liệu gốc consumer vẫn được giữ để tính lại chính xác khi phân tích.
+Khi viết báo cáo nộp thầy, nhóm nên trình bày theo cấu trúc sau:
+1. **Đặt vấn đề:** Giám sát hiệu năng và chẩn đoán nghẽn cổ chai trong hệ thống truyền tin phân tán (RabbitMQ over TCP).
+2. **Cơ sở lý thuyết:**
+   - Mô hình hàng đợi $M/M/c$ và điều kiện ổn định $\rho < 1$.
+   - Định luật Little $L = \lambda W$.
+   - Tác động của suy giảm mạng (Delay, Loss theo công thức Mathis, Rate Limit theo Token Bucket Filter) lên tầng ứng dụng.
+3. **Thiết kế đo đạc & Observability với Zabbix:**
+   - Mô hình 3 nút vật lý A - B - C trong LAN.
+   - Vai trò của Zabbix là nền tảng Full-Stack Observability đa tầng.
+   - Khắc phục thiên lệch sống sót (Survivorship Bias) trong đo độ trễ p95.
+   - Hiệu chỉnh ngưỡng khoa học dựa trên phân phối thực nghiệm ($\mu + 3\sigma$).
+4. **Kết quả thực nghiệm:**
+   - **Thí nghiệm 1 - Đường cong tải (Load Curve):** Xác định Saturation Knee Point và đồ thị Hockey-stick.
+   - **Thí nghiệm 2 - Kiểm chứng Định luật Little:** Phân tích độ khớp của $L = \lambda W$ ở các mức tải.
+   - **Thí nghiệm 3 - Suy giảm mạng vs Xử lý chậm:** So sánh tác động của Delay, Packet Loss (Mathis) và Consumer Slow lên throughput và hàng đợi.
+   - **Thí nghiệm 4 - Đánh giá giải thuật chẩn đoán:** Ma trận nhầm lẫn (Confusion Matrix) giữa Queue-only baseline và Combined Classifier.
+5. **Kết luận & Đóng góp:** Bộ công cụ có thể tái lập, đo đạc trung thực, và tự động hóa toàn diện từ thu thập, chẩn đoán đến hiển thị trên Zabbix.

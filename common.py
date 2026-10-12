@@ -57,6 +57,20 @@ def percentile(values, p):
     return data[low]+(data[high]-data[low])*(index-low)
 
 
+def mean(values):
+    cleaned = [v for v in values if v is not None]
+    return sum(cleaned)/len(cleaned) if cleaned else None
+
+
+def stddev(values):
+    cleaned = [v for v in values if v is not None]
+    if len(cleaned) < 2:
+        return 0.0 if len(cleaned) == 1 else None
+    m = sum(cleaned)/len(cleaned)
+    variance = sum((x-m)**2 for x in cleaned)/(len(cleaned)-1)
+    return variance**0.5
+
+
 def read_events(path):
     if not Path(path).exists():
         return []

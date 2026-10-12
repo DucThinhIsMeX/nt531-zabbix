@@ -14,17 +14,33 @@ from diagnose import CODES, StableLabel, diagnose
 def push(s, label):
     host = os.getenv('ZABBIX_APP_HOST', 'Lab-App')
     values = {'app.metrics.valid': int(s['broker_valid'] and s['app_valid']),
-              'app.diagnosis.code': CODES[label], 'app.completed_rate': s['completed_rate']}
-    if s['p95_ms'] is not None:
+              'app.diagnosis.code': CODES[label], 'app.completed_rate': s['completed_rate'],
+              'app.queue.alarm': s.get('queue_alarm', 0)}
+    if s.get('offered_rate') is not None:
+        values['app.offered_rate'] = s['offered_rate']
+    if s.get('unfinished_count') is not None:
+        values['app.unfinished_count'] = s['unfinished_count']
+    if s.get('backlog') is not None:
+        values['app.backlog'] = s['backlog']
+    if s.get('rtt_ms') is not None:
+        values['app.rtt_ms'] = s['rtt_ms']
+    if s.get('p95_ms') is not None:
         values['app.latency.p95'] = s['p95_ms']
-    if s['processing_ms'] is not None:
+    if s.get('processing_ms') is not None:
         values['app.processing.mean'] = s['processing_ms']
-    for key, value in values.items():
-        result = subprocess.run(['zabbix_sender', '-z', os.environ['ZABBIX_SERVER'],
-                                 '-s', host, '-k', key, '-o', str(value)],
-                                capture_output=True, text=True, timeout=8)
-        if result.returncode:
-            print('Sender failed:', key, result.stdout, result.stderr, flush=True)
+
+    # Batch send via stdin for lower latency, fallback to per-item on failure
+    lines = [f"{host} {k} {v}" for k, v in values.items()]
+    payload = '\n'.join(lines) + '\n'
+    result = subprocess.run(['zabbix_sender', '-z', os.environ['ZABBIX_SERVER'], '-i', '-'],
+                            input=payload, capture_output=True, text=True, timeout=8)
+    if result.returncode:
+        for key, value in values.items():
+            r = subprocess.run(['zabbix_sender', '-z', os.environ['ZABBIX_SERVER'],
+                                '-s', host, '-k', key, '-o', str(value)],
+                               capture_output=True, text=True, timeout=8)
+            if r.returncode:
+                print('Sender failed:', key, r.stdout, r.stderr, flush=True)
 
 
 def main():
@@ -49,7 +65,7 @@ def main():
     stable, queue_stable = StableLabel(2), StableLabel(2)
     previous = time.time()-a.interval
     fields = ['utc','ts','active','broker_valid','app_valid','probe_valid','backlog','consumers',
-              'rtt_ms','processing_ms','completed_rate','p95_ms','label','reason','queue_alarm']
+              'rtt_ms','processing_ms','offered_rate','completed_rate','unfinished_count','p95_ms','label','reason','queue_alarm']
     path = folder/'snapshots.csv'
     if path.exists():
         p.error('snapshots.csv exists; do not overwrite. Use a new run-id.')
@@ -64,14 +80,20 @@ def main():
                     manifest = json.loads((folder/'manifest.json').read_text())
                     events = read_events(folder/'events.jsonl')
                     recent = [e for e in events if e['event']=='completed' and previous < e['ts'] <= now]
+                    recent_attempted = [e for e in events if e['event']=='attempted' and previous < e['ts'] <= now]
+                    all_attempted = sum(1 for e in events if e['event']=='attempted')
+                    all_completed = sum(1 for e in events if e['event']=='completed')
+                    unfinished_count = max(0, all_attempted - all_completed)
                     heartbeat = json.loads((folder/'heartbeat.json').read_text())
                     app_valid = manifest.get('status') != 'running' or -2 <= time.time()-heartbeat['ts'] <= 30
                 except (OSError, ValueError, KeyError):
-                    manifest, recent, app_valid = {}, [], False
+                    manifest, recent, recent_attempted, unfinished_count, app_valid = {}, [], [], 0, False
                 s = dict(utc=utc(), ts=now, active=manifest.get('status')=='running',
                          broker_valid=False, app_valid=app_valid, probe_valid=False,
                          backlog=None, consumers=None, rtt_ms=None, processing_ms=None,
+                         offered_rate=len(recent_attempted)/max(.001, now-previous),
                          completed_rate=len(recent)/max(.001, now-previous),
+                         unfinished_count=unfinished_count,
                          p95_ms=percentile([e['latency_ms'] for e in recent], 95))
                 try:
                     r = session.get(queue_url, auth=auth, timeout=3)

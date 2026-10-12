@@ -5,6 +5,7 @@ from pathlib import Path
 from common import atomic_json, read_events
 
 EXPECTED = {'NORMAL':'NORMAL', 'NETWORK_DELAY':'NETWORK_SUSPECTED',
+            'NETWORK_LOSS':'NETWORK_SUSPECTED', 'NETWORK_RATE':'NETWORK_SUSPECTED',
             'CONSUMER_SLOW':'CONSUMER_SLOW_SUSPECTED', 'CONSUMER_DOWN':'CONSUMER_DOWN',
             'MIXED':'INCONCLUSIVE'}
 
