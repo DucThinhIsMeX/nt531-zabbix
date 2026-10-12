@@ -1,3 +1,4 @@
+import json
 import unittest
 from common import percentile
 from diagnose import diagnose, StableLabel
