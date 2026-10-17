@@ -47,8 +47,3 @@ sudo cp zabbix/nt531_agent_infra.conf /etc/zabbix/zabbix_agent2.d/
 sudo systemctl restart zabbix-agent2
 zabbix_agent2 -t 'nt531.ping.rtt[10.10.0.1]'   # kiểm thử, phải ra số
 ```
-
-## Ghi chú
-Repo gốc trên GitHub còn chứa phần code hướng cũ (RabbitMQ message queue:
-producer/consumer/collector/diagnose...) KHÔNG dùng cho ba kịch bản mạng này.
-Bộ code trong thư mục này là phần thực sự dùng cho báo cáo.
