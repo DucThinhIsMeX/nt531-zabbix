@@ -1,12 +1,9 @@
 # NT531 - Bộ code đồ án: Đánh giá hiệu năng mạng bằng Zabbix
 
-Đây là bộ code THỰC SỰ dùng trong đồ án (bản đã vá, khớp với số liệu trong báo cáo),
-cho ba kịch bản đo hiệu năng liên kết mạng.
-
 ## Vai trò ba máy
-- Máy A (MacBook): Zabbix Server, điều khiển, phân tích.
-- Máy B (Raspberry Pi): iperf3 server (đích đo). Chạy: `iperf3 -s`
-- Máy C (Raspberry Pi): chạy run_link_sweep.py (tạo nhiễu bằng tc + đo bằng iperf3/ping),
+- Máy A : Zabbix Server, điều khiển, phân tích.
+- Máy B : iperf3 server (đích đo). Chạy: `iperf3 -s`
+- Máy C : chạy run_link_sweep.py (tạo nhiễu bằng tc + đo bằng iperf3/ping),
   cài Zabbix agent + file zabbix/nt531_agent_infra.conf.
 
 Liên kết đo: cáp Ethernet C<->B, dải 10.10.0.x (B=10.10.0.1, C=10.10.0.2).
